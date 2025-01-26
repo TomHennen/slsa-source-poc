@@ -38,6 +38,7 @@ func Store(commit, predType, repoPath, dataPath string) (string, error) {
 	if !status.IsClean() {
 		return "", errors.New("Repo must be clean to store metadata")
 	}
+	// TODO: I don't think it's as simple as this.
 	err = worktree.Checkout(&git.CheckoutOptions{
 		Branch: "refs/slsa/commits",
 	})
@@ -64,6 +65,8 @@ func Store(commit, predType, repoPath, dataPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// TODO: actually get the file added, commited, and pushed.
 
 	return storePath, nil
 }
