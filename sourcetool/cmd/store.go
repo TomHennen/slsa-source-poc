@@ -16,6 +16,8 @@ type StoreArgs struct {
 	commit string
 	// The predicate type of the data.
 	predType string
+	// Path to the local repo to store the data in.
+	repoPath string
 }
 
 var (
@@ -31,7 +33,7 @@ Assumes the data is an in-toto attestation (https://github.com/in-toto/attestati
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			dataPath := args[0]
-			storedPath, err := store.Store(storeArgs.commit, storeArgs.predType, dataPath)
+			storedPath, err := store.Store(storeArgs.commit, storeArgs.predType, storeArgs.repoPath, dataPath)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -46,4 +48,6 @@ func init() {
 	// Here you will define your flags and configuration settings.
 	storeCmd.Flags().StringVar(&storeArgs.commit, "commit", "", "The commit to associate the data with. Default: current commit.")
 	storeCmd.Flags().StringVar(&storeArgs.predType, "pred_type", "https://slsa.dev/verification_summary/v1", "The predicate type of the data being stored.")
+	storeCmd.Flags().StringVar(&storeArgs.repoPath, "repo_path", ".", "Path to the local repo to store the metadata in.")
+
 }
