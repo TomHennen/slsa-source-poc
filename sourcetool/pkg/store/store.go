@@ -39,7 +39,6 @@ func Store(commit, predType, dataPath string) (string, error) {
 		return "", err
 	}
 	err = worktree.Checkout(&git.CheckoutOptions{
-		Create: true,
 		Branch: "refs/slsa/commits",
 	})
 	if err != nil {
