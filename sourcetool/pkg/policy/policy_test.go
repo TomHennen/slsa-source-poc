@@ -163,6 +163,434 @@ const (
 	sourcePolicyRepo      = "slsa-source-poc"
 )
 
+func TestComputeEligibleSlsaLevel(t *testing.T) {
+	fixedTime := time.Now()
+	continuityEnforcedControl := slsa_types.Control{Name: slsa_types.ContinuityEnforced, Since: fixedTime}
+	provenanceAvailableControl := slsa_types.Control{Name: slsa_types.ProvenanceAvailable, Since: fixedTime}
+
+	tests := []struct {
+		name           string
+		controls       slsa_types.Controls
+		expectedLevel  slsa_types.SlsaSourceLevel
+		expectedReason string
+	}{
+		{
+			name:           "SLSA Level 3",
+			controls:       slsa_types.Controls{continuityEnforcedControl, provenanceAvailableControl},
+			expectedLevel:  slsa_types.SlsaSourceLevel3,
+			expectedReason: "continuity is enable and provenance is available",
+		},
+		{
+			name:           "SLSA Level 2",
+			controls:       slsa_types.Controls{continuityEnforcedControl},
+			expectedLevel:  slsa_types.SlsaSourceLevel2,
+			expectedReason: "continuity is enabled but provenance is not available",
+		},
+		{
+			name:           "SLSA Level 1 - ProvenanceAvailable only",
+			controls:       slsa_types.Controls{provenanceAvailableControl},
+			expectedLevel:  slsa_types.SlsaSourceLevel1,
+			expectedReason: "continuity is not enabled",
+		},
+		{
+			name:           "SLSA Level 1 - ContinuityEnforced control absent",
+			controls:       nil, // Represents absence of ContinuityEnforced; could also use slsa_types.Controls{}
+			expectedLevel:  slsa_types.SlsaSourceLevel1,
+			expectedReason: "continuity is not enabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			level, reason := computeEligibleSlsaLevel(tt.controls)
+			if level != tt.expectedLevel {
+				t.Errorf("computeEligibleSlsaLevel() level = %v, want %v", level, tt.expectedLevel)
+			}
+			if reason != tt.expectedReason {
+				t.Errorf("computeEligibleSlsaLevel() reason = %q, want %q", reason, tt.expectedReason)
+			}
+		})
+	}
+}
+
+func TestComputeImmutableTags(t *testing.T) {
+	now := time.Now()
+	earlier := now.Add(-time.Hour)
+
+	// Branch Policies
+	policyRequiresImmutableTagsNow := ProtectedBranch{ImmutableTags: true, Since: now}
+	policyRequiresImmutableTagsEarlier := ProtectedBranch{ImmutableTags: true, Since: earlier}
+	policyNotRequiresImmutableTags := ProtectedBranch{ImmutableTags: false, Since: now}
+
+	// Controls
+	immutableTagsControlEnabledNow := slsa_types.Control{Name: slsa_types.ImmutableTags, Since: now}
+	// immutableTagsControlEnabledEarlier := slsa_types.Control{Name: slsa_types.ImmutableTags, Since: earlier} // No longer directly used in a test case
+
+	tests := []struct {
+		name                     string
+		branchPolicy             *ProtectedBranch
+		controls                 slsa_types.Controls
+		expectedImmutableEnforced  bool
+		expectError              bool
+		expectedErrorContains    string
+	}{
+		{
+			name:                      "Policy requires immutable tags, control compliant (Policy.Since >= Control.Since)",
+			branchPolicy:              &policyRequiresImmutableTagsNow,
+			controls:                  slsa_types.Controls{immutableTagsControlEnabledNow}, // Policy.Since == Control.Since
+			expectedImmutableEnforced: true,
+			expectError:               false,
+		},
+		{
+			name:                      "Policy does not require immutable tags - control state irrelevant",
+			branchPolicy:              &policyNotRequiresImmutableTags,
+			controls:                  slsa_types.Controls{}, // Control state explicitly shown as irrelevant
+			expectedImmutableEnforced: false,
+			expectError:               false,
+		},
+		{
+			name:                     "Policy requires immutable tags, control not present: fail",
+			branchPolicy:             &policyRequiresImmutableTagsNow,
+			controls:                 slsa_types.Controls{}, // Immutable tags control missing
+			expectedImmutableEnforced: false,
+			expectError:              true,
+			expectedErrorContains:    "policy requires immutable tags, but that control is not enabled",
+		},
+		{
+			name:                     "Policy requires immutable tags, control enabled, Policy.Since < Control.Since: fail",
+			branchPolicy:             &policyRequiresImmutableTagsEarlier,          // Policy.Since is 'earlier'
+			controls:                 slsa_types.Controls{immutableTagsControlEnabledNow}, // Control.Since is 'now'
+			expectedImmutableEnforced: false,
+			expectError:              true,
+			expectedErrorContains:    "policy requires immutable tags since", // ...but that control has only been enabled since...
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotEnforced, err := computeImmutableTags(tt.branchPolicy, tt.controls)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("computeImmutableTags() error = nil, want non-nil error containing %q", tt.expectedErrorContains)
+				} else if !strings.Contains(err.Error(), tt.expectedErrorContains) {
+					t.Errorf("computeImmutableTags() error = %q, want error containing %q", err.Error(), tt.expectedErrorContains)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("computeImmutableTags() error = %v, want nil", err)
+				}
+			}
+
+			if gotEnforced != tt.expectedImmutableEnforced {
+				t.Errorf("computeImmutableTags() gotEnforced = %v, want %v", gotEnforced, tt.expectedImmutableEnforced)
+			}
+		})
+	}
+}
+
+func TestComputeReviewEnforced(t *testing.T) {
+	now := time.Now()
+	earlier := now.Add(-time.Hour)
+	// later := now.Add(time.Hour) // Unused
+
+	// Branch Policies
+	policyRequiresReviewNow := ProtectedBranch{RequireReview: true, Since: now}
+	policyRequiresReviewEarlier := ProtectedBranch{RequireReview: true, Since: earlier}
+	policyNotRequiresReview := ProtectedBranch{RequireReview: false, Since: now}
+
+	// Controls
+	reviewControlEnabledNow := slsa_types.Control{Name: slsa_types.ReviewEnforced, Since: now}
+	// reviewControlEnabledEarlier := slsa_types.Control{Name: slsa_types.ReviewEnforced, Since: earlier} // Not used directly in new structure
+
+	tests := []struct {
+		name                   string
+		branchPolicy           *ProtectedBranch
+		controls               slsa_types.Controls
+		expectedReviewEnforced  bool
+		expectError            bool
+		expectedErrorContains  string
+	}{
+		{
+			name:                   "Policy requires review, control compliant (Policy.Since >= Control.Since)",
+			branchPolicy:           &policyRequiresReviewNow,
+			controls:               slsa_types.Controls{reviewControlEnabledNow}, // Policy.Since == Control.Since
+			expectedReviewEnforced: true,
+			expectError:            false,
+		},
+		{
+			name:                   "Policy does not require review - control state irrelevant",
+			branchPolicy:           &policyNotRequiresReview,
+			controls:               slsa_types.Controls{}, // Control state explicitly shown as irrelevant
+			expectedReviewEnforced: false,
+			expectError:            false,
+		},
+		{
+			name:                   "Policy requires review, control not present: fail",
+			branchPolicy:           &policyRequiresReviewNow,
+			controls:               slsa_types.Controls{}, // Review control missing
+			expectedReviewEnforced: false,
+			expectError:            true,
+			expectedErrorContains:  "policy requires review, but that control is not enabled",
+		},
+		{
+			name:                   "Policy requires review, control enabled, Policy.Since < Control.Since: fail",
+			branchPolicy:           &policyRequiresReviewEarlier,          // Policy.Since is 'earlier'
+			controls:               slsa_types.Controls{reviewControlEnabledNow}, // Control.Since is 'now'
+			expectedReviewEnforced: false,
+			expectError:            true,
+			expectedErrorContains:  "policy requires review since", // ...but that control has only been enabled since...
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotEnforced, err := computeReviewEnforced(tt.branchPolicy, tt.controls)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("computeReviewEnforced() error = nil, want non-nil error containing %q", tt.expectedErrorContains)
+				} else if !strings.Contains(err.Error(), tt.expectedErrorContains) {
+					t.Errorf("computeReviewEnforced() error = %q, want error containing %q", err.Error(), tt.expectedErrorContains)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("computeReviewEnforced() error = %v, want nil", err)
+				}
+			}
+
+			if gotEnforced != tt.expectedReviewEnforced {
+				t.Errorf("computeReviewEnforced() gotEnforced = %v, want %v", gotEnforced, tt.expectedReviewEnforced)
+			}
+		})
+	}
+}
+
+func TestComputeSlsaLevel(t *testing.T) {
+	now := time.Now()
+	earlier := now.Add(-time.Hour)
+	// later := now.Add(time.Hour) // Unused
+
+	// Controls
+	continuityEnforcedNow := slsa_types.Control{Name: slsa_types.ContinuityEnforced, Since: now}
+	provenanceAvailableNow := slsa_types.Control{Name: slsa_types.ProvenanceAvailable, Since: now}
+	continuityEnforcedEarlier := slsa_types.Control{Name: slsa_types.ContinuityEnforced, Since: earlier}
+	provenanceAvailableEarlier := slsa_types.Control{Name: slsa_types.ProvenanceAvailable, Since: earlier}
+
+	// Branch Policies
+	policyL3Now := ProtectedBranch{TargetSlsaSourceLevel: slsa_types.SlsaSourceLevel3, Since: now}
+	// policyL3Later := ProtectedBranch{TargetSlsaSourceLevel: slsa_types.SlsaSourceLevel3, Since: later} // Unused
+	policyL2Now := ProtectedBranch{TargetSlsaSourceLevel: slsa_types.SlsaSourceLevel2, Since: now}
+	// policyL1Now := ProtectedBranch{TargetSlsaSourceLevel: slsa_types.SlsaSourceLevel1, Since: now} // Unused
+	policyUnknownLevel := ProtectedBranch{TargetSlsaSourceLevel: "UNKNOWN_LEVEL", Since: now}
+
+	tests := []struct {
+		name                  string
+		branchPolicy          *ProtectedBranch
+		controls              slsa_types.Controls
+		expectedLevel         slsa_types.SlsaSourceLevel
+		expectError           bool
+		expectedErrorContains string
+	}{
+		{
+			name:                  "Controls L3-eligible (since 'earlier'), Policy L2 (since 'now'): success",
+			branchPolicy:          &policyL2Now,                                                          // Policy L2, Since 'now'
+			controls:              slsa_types.Controls{continuityEnforcedEarlier, provenanceAvailableEarlier}, // Eligible L3 since 'earlier'
+			expectedLevel:         slsa_types.SlsaSourceLevel2,
+			expectError:           false,
+		},
+		{
+			name:                  "Controls L1-eligible, Policy L2: fail (eligibility)",
+			branchPolicy:          &policyL2Now,                // Policy L2
+			controls:              slsa_types.Controls{},       // Eligible L1
+			expectedLevel:         "",
+			expectError:           true,
+			expectedErrorContains: "policy sets target level SLSA_SOURCE_LEVEL_2, but branch is only eligible for SLSA_SOURCE_LEVEL_1",
+		},
+		{
+			name:                  "Eligible L3 (since 'earlier'), Policy L3 (since 'now'): compliant Policy.Since",
+			branchPolicy:          &policyL3Now,                                                          // Policy L3, Since 'now'
+			controls:              slsa_types.Controls{continuityEnforcedEarlier, provenanceAvailableEarlier}, // Eligible L3 since 'earlier'
+			expectedLevel:         slsa_types.SlsaSourceLevel3,                                           // Policy.Since ('now') is not before EligibleSince ('earlier')
+			expectError:           false,
+		},
+		{
+			name:                  "Controls L3-eligible (since 'now'), Policy L3 (since 'earlier'): fail (Policy.Since too early)",
+			branchPolicy:          &ProtectedBranch{TargetSlsaSourceLevel: slsa_types.SlsaSourceLevel3, Since: earlier}, // Policy L3, Since 'earlier'
+			controls:              slsa_types.Controls{continuityEnforcedNow, provenanceAvailableNow},                   // Eligible L3 since 'now'
+			expectedLevel:         "",
+			expectError:           true,
+			expectedErrorContains: "policy sets target level SLSA_SOURCE_LEVEL_3 since", // ...but it has only been eligible for that level since...
+		},
+		{
+			name:                  "Policy L?'UNKNOWN' (controls L3-eligible): fail (policy target unknown)",
+			branchPolicy:          &policyUnknownLevel,                                     // Policy "UNKNOWN_LEVEL"
+			controls:              slsa_types.Controls{continuityEnforcedNow, provenanceAvailableNow}, // Eligible L3
+			expectedLevel:         "",
+			expectError:           true,
+			expectedErrorContains: "policy sets target level UNKNOWN_LEVEL, but branch is only eligible for",
+		},
+		// This single case covers eligibility failure where target > eligible.
+		// It replaces the two previous similar cases:
+		// "computeEligibleSince returns nil (controls insufficient for target level)" which was L2 controls for L3 policy
+		// "Controls for L1, Policy L3, computeEligibleSince for L3 returns nil" which was L1 controls for L3 policy
+		{
+			name:                  "Controls L1-eligible, Policy L3: fail (eligibility)",
+			branchPolicy:          &policyL3Now,          // Policy L3
+			controls:              slsa_types.Controls{}, // Eligible L1
+			expectedLevel:         "",
+			expectError:           true,
+			expectedErrorContains: "policy sets target level SLSA_SOURCE_LEVEL_3, but branch is only eligible for SLSA_SOURCE_LEVEL_1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotLevel, err := computeSlsaLevel(tt.branchPolicy, tt.controls)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("computeSlsaLevel() error = nil, want non-nil error containing %q", tt.expectedErrorContains)
+				} else if !strings.Contains(err.Error(), tt.expectedErrorContains) {
+					t.Errorf("computeSlsaLevel() error = %q, want error containing %q", err.Error(), tt.expectedErrorContains)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("computeSlsaLevel() error = %v, want nil", err)
+				}
+			}
+
+			if gotLevel != tt.expectedLevel {
+				t.Errorf("computeSlsaLevel() gotLevel = %v, want %v", gotLevel, tt.expectedLevel)
+			}
+		})
+	}
+}
+
+func TestComputeEligibleSince(t *testing.T) {
+	time1 := time.Now()
+	time2 := time1.Add(time.Hour)
+	zeroTime := time.Time{}
+
+	continuityEnforcedT1 := slsa_types.Control{Name: slsa_types.ContinuityEnforced, Since: time1}
+	provenanceAvailableT1 := slsa_types.Control{Name: slsa_types.ProvenanceAvailable, Since: time1}
+	continuityEnforcedT2 := slsa_types.Control{Name: slsa_types.ContinuityEnforced, Since: time2}
+	provenanceAvailableT2 := slsa_types.Control{Name: slsa_types.ProvenanceAvailable, Since: time2}
+	continuityEnforcedZero := slsa_types.Control{Name: slsa_types.ContinuityEnforced, Since: zeroTime}
+	provenanceAvailableZero := slsa_types.Control{Name: slsa_types.ProvenanceAvailable, Since: zeroTime}
+
+	tests := []struct {
+		name          string
+		controls      slsa_types.Controls
+		level         slsa_types.SlsaSourceLevel
+		expectedTime  *time.Time
+		expectError   bool
+		expectedError string
+	}{
+		{
+			name:          "L3 eligible (ProvLater), L3 requested: expect Prov.Since", // Was: "Eligible for SLSA Level 3 - time1 later"
+			controls:      slsa_types.Controls{continuityEnforcedT1, provenanceAvailableT2}, // Prov.Since (time2) > Cont.Since (time1)
+			level:         slsa_types.SlsaSourceLevel3,
+			expectedTime:  &time2, // Expect later of the two: time2 (Prov.Since)
+			expectError:   false,
+		},
+		{
+			name:          "L3 eligible (ContLater), L3 requested: expect Cont.Since", // Was: "Eligible for SLSA Level 3 - time2 later"
+			controls:      slsa_types.Controls{continuityEnforcedT2, provenanceAvailableT1}, // Cont.Since (time2) > Prov.Since (time1)
+			level:         slsa_types.SlsaSourceLevel3,
+			expectedTime:  &time2, // Expect later of the two: time2 (Cont.Since)
+			expectError:   false,
+		},
+		{
+			name:          "L2 eligible (ContOnly), L2 requested: expect Cont.Since", // Was: "Eligible for SLSA Level 2"
+			controls:      slsa_types.Controls{continuityEnforcedT1},
+			level:         slsa_types.SlsaSourceLevel2,
+			expectedTime:  &time1,
+			expectError:   false,
+		},
+		{
+			name:          "L1 eligible (NoControls), L1 requested: expect ZeroTime", // Was: "Eligible for SLSA Level 1"
+			controls:      slsa_types.Controls{},
+			level:         slsa_types.SlsaSourceLevel1,
+			expectedTime:  &zeroTime,
+			expectError:   false,
+		},
+		{
+			name:          "L3 eligible, L2 requested: expect Cont.Since", // Was: "Controls for Level 3, requesting Level 2"
+			controls:      slsa_types.Controls{continuityEnforcedT1, provenanceAvailableT2}, // Eligible for L3 (Cont.Since T1, Prov.Since T2)
+			level:         slsa_types.SlsaSourceLevel2,                                     // Requesting L2
+			expectedTime:  &time1,                                                        // Expect Cont.Since (T1)
+			expectError:   false,
+		},
+		{
+			name:          "L2 eligible, L3 requested: expect nil, no error", // Was: "Controls for Level 2, requesting Level 3"
+			controls:      slsa_types.Controls{continuityEnforcedT1},       // Eligible for L2
+			level:         slsa_types.SlsaSourceLevel3,                     // Requesting L3
+			expectedTime:  nil,                                           // Not eligible for L3
+			expectError:   false,
+		},
+		{
+			name:          "Unknown level requested: expect nil, error", // Was: "Unknown SLSA level"
+			controls:      slsa_types.Controls{},
+			level:         slsa_types.SlsaSourceLevel("UNKNOWN_LEVEL"),
+			expectedTime:  nil,
+			expectError:   true,
+			expectedError: "unknown level UNKNOWN_LEVEL",
+		},
+		{
+			name:          "L3 eligible (ContZero, ProvNonZero), L3 requested: expect Prov.Since", // Was: "Controls for SLSA Level 3, continuity zero time"
+			controls:      slsa_types.Controls{continuityEnforcedZero, provenanceAvailableT2},   // Prov.Since (time2) is non-zero
+			level:         slsa_types.SlsaSourceLevel3,
+			expectedTime:  &time2, // Expect Prov.Since
+			expectError:   false,
+		},
+		{
+			name:          "L3 eligible (ContNonZero, ProvZero), L3 requested: expect Cont.Since", // Was: "Controls for SLSA Level 3, provenance zero time"
+			controls:      slsa_types.Controls{continuityEnforcedT1, provenanceAvailableZero},    // Cont.Since (time1) is non-zero
+			level:         slsa_types.SlsaSourceLevel3,
+			expectedTime:  &time1, // Expect Cont.Since
+			expectError:   false,
+		},
+		{
+			name:          "L3 eligible (BothZero), L3 requested: expect ZeroTime", // Was: "Controls for SLSA Level 3, both zero time"
+			controls:      slsa_types.Controls{continuityEnforcedZero, provenanceAvailableZero},
+			level:         slsa_types.SlsaSourceLevel3,
+			expectedTime:  &zeroTime,
+			expectError:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotTime, err := computeEligibleSince(tt.controls, tt.level)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("computeEligibleSince() error = nil, want non-nil error")
+				} else if err.Error() != tt.expectedError {
+					t.Errorf("computeEligibleSince() error = %q, want %q", err.Error(), tt.expectedError)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("computeEligibleSince() error = %v, want nil", err)
+				}
+			}
+
+			if tt.expectedTime == nil {
+				if gotTime != nil {
+					t.Errorf("computeEligibleSince() gotTime = %v, want nil", gotTime)
+				}
+			} else {
+				if gotTime == nil {
+					t.Errorf("computeEligibleSince() gotTime = nil, want %v", *tt.expectedTime)
+				} else if !gotTime.Equal(*tt.expectedTime) {
+					t.Errorf("computeEligibleSince() gotTime = %v, want %v", *gotTime, *tt.expectedTime)
+				}
+			}
+		})
+	}
+}
+
 func TestGetBranchPolicy_Local_SpecificFound(t *testing.T) {
 	fixedTime := time.Unix(1678886400, 0) // March 15, 2023 00:00:00 UTC
 
